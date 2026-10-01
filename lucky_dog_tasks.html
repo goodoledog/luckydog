@@ -885,27 +885,45 @@ async function syncFromSheet() {
   }
 }
 
+async function postToSheet(body) {
+  // text/plain keeps this a "simple" request so Apps Script doesn't need a CORS preflight
+  const res = await fetch(state.scriptUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Write error: ${res.status}`);
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || 'Write error');
+  return data;
+}
+
+// Every completed task goes to the sheet's Task_Log; the two "Log ... Date"
+// tasks also stamp Last_Root / Last_Prune in Pallet_Master.
 async function logCompletionToSheet(taskId, taskName, palletNums) {
   if (!state.scriptUrl) return;
-  if (!['root_log', 'prune_log'].includes(taskId)) return; // only log actual date tasks
 
   setSyncStatus('syncing', 'Writing to sheet...');
-
   try {
-    // text/plain keeps this a "simple" request so Apps Script doesn't need a CORS preflight
-    const res = await fetch(state.scriptUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ taskId, pallets: palletNums, staff: state.staffName }),
-    });
-    if (!res.ok) throw new Error(`Write error: ${res.status}`);
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || 'Write error');
-
+    await postToSheet({ action: 'complete', taskId, taskName, pallets: palletNums, staff: state.staffName });
     setSyncStatus('synced', 'Written ' + formatTime(new Date()));
-    syncFromSheet().catch(() => {}); // pull the new dates back in
+    if (['root_log', 'prune_log'].includes(taskId)) {
+      syncFromSheet().catch(() => {}); // pull the new dates back in
+    }
   } catch(err) {
     setSyncStatus('error', 'Write failed');
+    console.error(err);
+  }
+}
+
+async function saveBlockToSheet(block) {
+  if (!state.scriptUrl) return;
+  setSyncStatus('syncing', 'Saving block...');
+  try {
+    await postToSheet({ action: 'setBlock', block });
+    setSyncStatus('synced', 'Block saved ' + formatTime(new Date()));
+  } catch(err) {
+    setSyncStatus('error', 'Block not saved');
     console.error(err);
   }
 }
@@ -1064,9 +1082,7 @@ function toggleCheck(event, taskId, palletNums) {
       timestamp: new Date().toISOString(),
       staffName: state.staffName,
     });
-    if (['root_log','prune_log'].includes(taskId)) {
-      logCompletionToSheet(taskId, task?.name, palletNums);
-    }
+    logCompletionToSheet(taskId, task?.name, palletNums);
   }
 
   saveState();
@@ -1096,6 +1112,7 @@ function setBlock(num) {
   state.currentBlock = num;
   saveState();
   renderApp();
+  saveBlockToSheet(num);
 }
 
 function showScreen(name) {

@@ -1,14 +1,15 @@
 // Lucky Dog — Mother Room tracker bridge
 //
-// Paste this into the "Lucky Dog Mother Room" sheet:
-//   Extensions → Apps Script → replace Code.gs with this file → Save
-//   Deploy → New deployment → type "Web app"
-//     Execute as: Me
-//     Who has access: Anyone
-//   Copy the Web app URL (ends in /exec) into the tracker's setup screen.
+// Setup steps are in SETUP.md.
 //
 // GET  returns the current block and every pallet row.
-// POST {taskId, pallets} writes today's date into Last_Root or Last_Prune.
+// POST {action: 'complete', taskId, taskName, pallets, staff}
+//      appends a row to Task_Log, and for the two "Log ... Date" tasks
+//      writes today's date into Last_Root or Last_Prune.
+// POST {action: 'setBlock', block} writes This_Week!C1.
+//
+// After pasting a new version, use Deploy → Manage deployments → edit →
+// Version: New version, so the /exec URL keeps working with the new code.
 
 const TZ = Session.getScriptTimeZone();
 
@@ -50,30 +51,56 @@ function doPost(e) {
     return json({ ok: false, error: 'Bad request' });
   }
 
-  const col = DATE_TASKS[req.taskId];
-  if (!col) return json({ ok: false, error: 'Unknown task: ' + req.taskId });
-
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    const pm = SpreadsheetApp.getActive().getSheetByName('Pallet_Master');
-    const last = pm.getLastRow();
-    const nums = last < 2 ? [] : pm.getRange(2, COL.pallet, last - 1, 1).getValues().map(r => Number(r[0]));
-    const today = todayInScriptTz();
-
-    const updated = [];
-    const missing = [];
-    (req.pallets || []).forEach(p => {
-      const idx = nums.indexOf(Number(p));
-      if (idx < 0) { missing.push(p); return; }
-      pm.getRange(idx + 2, col).setValue(today);
-      updated.push(Number(p));
-    });
-
-    return json({ ok: true, updated, missing });
+    if (req.action === 'setBlock') return setBlock(req);
+    if (req.action === 'complete') return completeTask(req);
+    return json({ ok: false, error: 'Unknown action: ' + req.action });
   } finally {
     lock.releaseLock();
   }
+}
+
+function setBlock(req) {
+  const block = Number(req.block);
+  if (!(block >= 1 && block <= 5)) return json({ ok: false, error: 'Block must be 1 to 5' });
+  SpreadsheetApp.getActive().getSheetByName('This_Week').getRange('C1').setValue(block);
+  return json({ ok: true, block });
+}
+
+function completeTask(req) {
+  const ss = SpreadsheetApp.getActive();
+  const pallets = (req.pallets || []).map(Number);
+
+  let log = ss.getSheetByName('Task_Log');
+  if (!log) {
+    log = ss.insertSheet('Task_Log');
+    log.appendRow(['Timestamp', 'Staff', 'Task', 'Pallets']);
+    log.getRange('A1:D1').setFontWeight('bold');
+    log.setFrozenRows(1);
+    log.getRange('A:A').setNumberFormat('m/d/yyyy h:mm am/pm');
+  }
+  log.appendRow([new Date(), String(req.staff || ''), String(req.taskName || req.taskId), pallets.join(', ')]);
+
+  const col = DATE_TASKS[req.taskId];
+  if (!col) return json({ ok: true, updated: [], missing: [] });
+
+  const pm = ss.getSheetByName('Pallet_Master');
+  const last = pm.getLastRow();
+  const nums = last < 2 ? [] : pm.getRange(2, COL.pallet, last - 1, 1).getValues().map(r => Number(r[0]));
+  const today = todayInScriptTz();
+
+  const updated = [];
+  const missing = [];
+  pallets.forEach(p => {
+    const idx = nums.indexOf(p);
+    if (idx < 0) { missing.push(p); return; }
+    pm.getRange(idx + 2, col).setValue(today);
+    updated.push(p);
+  });
+
+  return json({ ok: true, updated, missing });
 }
 
 function fmtDate(v) {
