@@ -11,7 +11,13 @@
 // After pasting a new version, use Deploy → Manage deployments → edit →
 // Version: New version, so the /exec URL keeps working with the new code.
 
-const TZ = Session.getScriptTimeZone();
+// The Lucky Dog Mother Room sheet. Used when this runs as a standalone
+// script; a script attached to the sheet itself uses the active sheet.
+const SHEET_ID = '1TCpYgCdIUdW9FxiBxOLC3h3EEB2zTE0bK3Gch-P64f4';
+
+function getSs() {
+  return SpreadsheetApp.getActive() || SpreadsheetApp.openById(SHEET_ID);
+}
 
 // Pallet_Master columns (1-based)
 const COL = { pallet: 1, block: 2, room: 3, lastRoot: 4, lastSurface: 5, lastPrune: 6, lastSalt: 7, daysSinceSalt: 8 };
@@ -20,7 +26,7 @@ const COL = { pallet: 1, block: 2, room: 3, lastRoot: 4, lastSurface: 5, lastPru
 const DATE_TASKS = { root_log: COL.lastRoot, prune_log: COL.lastPrune };
 
 function doGet() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSs();
   const block = Number(ss.getSheetByName('This_Week').getRange('C1').getValue()) || 1;
 
   const pm = ss.getSheetByName('Pallet_Master');
@@ -65,12 +71,12 @@ function doPost(e) {
 function setBlock(req) {
   const block = Number(req.block);
   if (!(block >= 1 && block <= 5)) return json({ ok: false, error: 'Block must be 1 to 5' });
-  SpreadsheetApp.getActive().getSheetByName('This_Week').getRange('C1').setValue(block);
+  getSs().getSheetByName('This_Week').getRange('C1').setValue(block);
   return json({ ok: true, block });
 }
 
 function completeTask(req) {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSs();
   const pallets = (req.pallets || []).map(Number);
 
   let log = ss.getSheetByName('Task_Log');
@@ -103,13 +109,17 @@ function completeTask(req) {
   return json({ ok: true, updated, missing });
 }
 
+function tz() {
+  return getSs().getSpreadsheetTimeZone();
+}
+
 function fmtDate(v) {
-  if (v instanceof Date) return Utilities.formatDate(v, TZ, 'M/d/yyyy');
+  if (v instanceof Date) return Utilities.formatDate(v, tz(), 'M/d/yyyy');
   return v === '' ? '' : String(v);
 }
 
 function todayInScriptTz() {
-  const [y, m, d] = Utilities.formatDate(new Date(), TZ, 'yyyy-M-d').split('-').map(Number);
+  const [y, m, d] = Utilities.formatDate(new Date(), tz(), 'yyyy-M-d').split('-').map(Number);
   return new Date(y, m - 1, d);
 }
 
