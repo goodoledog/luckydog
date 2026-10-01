@@ -556,15 +556,9 @@
   </div>
 
   <div class="setup-card">
-    <h3>Google Sheet ID</h3>
-    <input type="text" id="sheetId" placeholder="1fX245hb... (from your Sheet URL)" autocomplete="off" autocorrect="off" spellcheck="false">
-    <div class="hint">From your Sheet URL: docs.google.com/spreadsheets/d/<strong>[THIS PART]</strong>/edit</div>
-  </div>
-
-  <div class="setup-card">
-    <h3>Google API Key</h3>
-    <input type="password" id="apiKey" placeholder="AIza..." autocomplete="off" autocorrect="off" spellcheck="false">
-    <div class="hint">Create at console.cloud.google.com → APIs &amp; Services → Credentials → API Key. Enable Google Sheets API.</div>
+    <h3>Sheet Web App URL</h3>
+    <input type="url" id="scriptUrl" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off" autocorrect="off" spellcheck="false">
+    <div class="hint">In the Mother Room sheet: Extensions → Apps Script → Deploy → Web app. Paste the URL ending in <strong>/exec</strong>.</div>
   </div>
 
   <div class="setup-card">
@@ -642,7 +636,7 @@
 
       <div style="background:var(--white);border-radius:var(--radius);overflow:hidden;margin-bottom:14px;">
         <div class="settings-row" style="border-bottom:1px solid var(--gray);">
-          <label>Sheet ID</label>
+          <label>Web App URL</label>
           <span class="settings-val" id="settingsSheetId">—</span>
         </div>
         <div class="settings-row" style="border-bottom:1px solid var(--gray);">
@@ -814,8 +808,7 @@ const PRUNE_TASKS = [
 // ═══════════════════════════════════════════════
 
 let state = {
-  sheetId: '',
-  apiKey: '',
+  scriptUrl: '',
   staffName: '',
   currentBlock: 1,
   pallets: [],          // [{num, block, lastRoot, lastSurface, lastPrune, lastSalt, daysSinceSalt}]
@@ -847,18 +840,16 @@ function saveState() {
 // ═══════════════════════════════════════════════
 
 function saveSetup() {
-  const sheetId = document.getElementById('sheetId').value.trim();
-  const apiKey  = document.getElementById('apiKey').value.trim();
-  const name    = document.getElementById('staffName').value.trim();
+  const scriptUrl = document.getElementById('scriptUrl').value.trim();
+  const name      = document.getElementById('staffName').value.trim();
 
-  if (!sheetId || !apiKey) {
-    document.getElementById('setupError').textContent = 'Sheet ID and API Key are required.';
+  if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(scriptUrl)) {
+    document.getElementById('setupError').textContent = 'Paste the Web App URL from Apps Script (starts with https://script.google.com and ends in /exec).';
     document.getElementById('setupError').style.display = 'block';
     return;
   }
 
-  state.sheetId   = sheetId;
-  state.apiKey    = apiKey;
+  state.scriptUrl = scriptUrl;
   state.staffName = name || 'Staff';
   saveState();
   initApp();
@@ -868,82 +859,51 @@ function saveSetup() {
 // GOOGLE SHEETS API
 // ═══════════════════════════════════════════════
 
-async function fetchSheetRange(range) {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(range)}?key=${state.apiKey}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Sheet API error: ${res.status}`);
-  const data = await res.json();
-  return data.values || [];
-}
-
-async function writeSheetRange(range, values) {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED&key=${state.apiKey}`;
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ range, majorDimension: 'ROWS', values })
-  });
-  if (!res.ok) throw new Error(`Write error: ${res.status}`);
-  return res.json();
-}
+// Reads and writes go through the Apps Script web app bound to the sheet
+// (see apps_script.gs). It runs as the sheet owner, so no API key is needed
+// and the sheet can stay private.
 
 async function syncFromSheet() {
   setSyncStatus('syncing', 'Syncing...');
   try {
-    // Fetch This_Week!C1 for current block
-    const blockData = await fetchSheetRange('This_Week!C1');
-    if (blockData.length && blockData[0].length) {
-      state.currentBlock = parseInt(blockData[0][0]) || 1;
-    }
+    const res = await fetch(state.scriptUrl);
+    if (!res.ok) throw new Error(`Sync error: ${res.status}`);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Sync error');
 
-    // Fetch Pallet_Master A2:H26 (pallet, block, room, lastRoot, lastSurface, lastPrune, lastSalt, daysSince)
-    const pmData = await fetchSheetRange('Pallet_Master!A2:H26');
-    state.pallets = pmData
-      .filter(row => row[0])
-      .map(row => ({
-        num:          parseInt(row[0]) || 0,
-        block:        parseInt(row[1]) || 0,
-        room:         row[2] || '',
-        lastRoot:     row[3] || '',
-        lastSurface:  row[4] || '',
-        lastPrune:    row[5] || '',
-        lastSalt:     row[6] || '',
-        daysSinceSalt: row[7] ? parseInt(row[7]) : null,
-      }));
+    state.currentBlock = parseInt(data.block) || 1;
+    state.pallets = data.pallets;
 
     state.lastSync = new Date().toISOString();
     saveState();
     setSyncStatus('synced', 'Synced ' + formatTime(new Date()));
     renderApp();
   } catch(err) {
-    setSyncStatus('error', 'Sync failed — check API key');
+    setSyncStatus('error', 'Sync failed — check Web App URL');
     console.error(err);
+    throw err;
   }
 }
 
 async function logCompletionToSheet(taskId, taskName, palletNums) {
-  if (!state.sheetId || !state.apiKey) return;
+  if (!state.scriptUrl) return;
+  if (!['root_log', 'prune_log'].includes(taskId)) return; // only log actual date tasks
 
-  const today = formatDateForSheet(new Date());
-  const colMap = {
-    'root_log':  'D', // Last_Root
-    'prune_log': 'F', // Last_Prune
-  };
-
-  if (!colMap[taskId]) return; // only log actual date tasks
-
-  const col = colMap[taskId];
   setSyncStatus('syncing', 'Writing to sheet...');
 
   try {
-    for (const pNum of palletNums) {
-      const pallet = state.pallets.find(p => p.num === pNum);
-      if (!pallet) continue;
-      const rowIndex = state.pallets.indexOf(pallet);
-      const sheetRow = rowIndex + 2; // 1-indexed + header
-      await writeSheetRange(`Pallet_Master!${col}${sheetRow}`, [[today]]);
-    }
+    // text/plain keeps this a "simple" request so Apps Script doesn't need a CORS preflight
+    const res = await fetch(state.scriptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ taskId, pallets: palletNums, staff: state.staffName }),
+    });
+    if (!res.ok) throw new Error(`Write error: ${res.status}`);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Write error');
+
     setSyncStatus('synced', 'Written ' + formatTime(new Date()));
+    syncFromSheet().catch(() => {}); // pull the new dates back in
   } catch(err) {
     setSyncStatus('error', 'Write failed');
     console.error(err);
@@ -1025,7 +985,7 @@ function renderApp() {
   updateProgress();
 
   // Settings
-  document.getElementById('settingsSheetId').textContent = state.sheetId ? state.sheetId.substring(0,20)+'...' : '—';
+  document.getElementById('settingsSheetId').textContent = state.scriptUrl ? '…' + state.scriptUrl.slice(-24) : '—';
   document.getElementById('settingsName').textContent = state.staffName || '—';
   document.getElementById('settingsLastSync').textContent = state.lastSync ? formatTime(new Date(state.lastSync)) : 'Never';
 
@@ -1189,10 +1149,6 @@ function formatTime(d) {
   return d.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit', hour12:true});
 }
 
-function formatDateForSheet(d) {
-  return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
-}
-
 // ═══════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════
@@ -1217,7 +1173,7 @@ function initApp() {
 
 // Boot
 loadState();
-if (state.sheetId && state.apiKey) {
+if (state.scriptUrl) {
   initApp();
 } else {
   document.getElementById('setupScreen').style.display = 'block';
