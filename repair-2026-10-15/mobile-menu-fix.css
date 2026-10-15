@@ -1,0 +1,6 @@
+/* Mobile menu open state (Squarespace's script used to inject this). */
+.header--menu-open .header-menu { opacity: 1; visibility: visible; }
+.header--menu-open .header-announcement-bar-wrapper { position: relative; z-index: 2; }
+/* While the menu is open, keep the header (menu + close button) above the mailing-list popup. */
+body.header--menu-open .header { z-index: 100000; }
+.header-burger-btn { cursor: pointer; }
